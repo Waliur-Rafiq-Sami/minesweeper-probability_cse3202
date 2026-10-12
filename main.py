@@ -42,10 +42,22 @@ def run_online():
             safe_moves = set(analysis["safe_moves"])
             mines = set(analysis["mines_to_flag"])
             best_move = analysis["best_move"]
-            scraper.highlight_cells(safe_moves, mines, best_move)
+            scraper.highlight_cells(
+                safe_moves,
+                mines,
+                best_move,
+                recommended_safe=analysis["best_move_safe"],
+                recommended_risk=analysis["best_move_risk"],
+            )
+            if best_move is None:
+                yellow_status = "none"
+            elif analysis["best_move_safe"]:
+                yellow_status = "PROVABLE SAFE"
+            else:
+                yellow_status = f"UNCERTAIN, mine risk={analysis['best_move_risk']:.0%}"
             print(
                 f"[AI] Ready: red={len(mines)} mine(s), green={len(safe_moves)} safe move(s), "
-                f"yellow={'safe' if analysis['best_move_safe'] else 'risk/none'}"
+                f"yellow={yellow_status}"
             )
             print(
                 f"[AI] Board {len(board)}x{len(board[0])}: "
