@@ -1,79 +1,97 @@
-"""Run a constraint-based Minesweeper player in a browser."""
-
-from __future__ import annotations
-
 import argparse
-import os
 import time
-
-from scraper import Cell, MinesweeperScraper, UNKNOWN, FLAG, build_driver
-
-
-def neighbours(board: list[list[Cell]], row: int, column: int):
-    for row_offset in (-1, 0, 1):
-        for column_offset in (-1, 0, 1):
-            if not row_offset and not column_offset:
-                continue
-            next_row = row + row_offset
-            next_column = column + column_offset
-            if 0 <= next_row < len(board) and 0 <= next_column < len(board[0]):
-                yield board[next_row][next_column]
+from scraper import MinesweeperScraper, SiteBlockedError
+from solver import MinesweeperAgent
 
 
-def find_moves(board: list[list[Cell]]) -> tuple[set[Cell], set[Cell]]:
-    """Return cells proven safe and cells proven to contain mines."""
-    safe: set[Cell] = set()
-    mines: set[Cell] = set()
-    for row in board:
-        for cell in row:
-            if cell.value < 0:
-                continue
-            adjacent = list(neighbours(board, cell.row, cell.column))
-            unknown = {item for item in adjacent if item.value == UNKNOWN}
-            flagged = sum(item.value == FLAG for item in adjacent)
-            remaining = cell.value - flagged
-            if remaining == 0:
-                safe.update(unknown)
-            elif remaining == len(unknown):
-                mines.update(unknown)
-    safe.difference_update(mines)
-    return safe, mines
+RUN_MODE = "online"
+SAFE_MODE = True
+OFFLINE_BOARD = [
+    [1, "F", 1],
+    [1, -1, 1],
+    [0, 0, 0],
+]
 
 
-def play(url: str, delay: float, headless: bool) -> None:
-    driver = build_driver(headless)
-    scraper = MinesweeperScraper(driver)
+def run_offline():
+    """Run the solver without making any network or browser requests."""
+    agent = MinesweeperAgent()
+    analysis = agent.update(OFFLINE_BOARD)
+    print("--- Offline Board ---")
+    for row in OFFLINE_BOARD:
+        print(row)
+    print(f"[AI] Guaranteed safe moves: {sorted(analysis['safe_moves'])}")
+    print(f"[AI] Guaranteed mines: {sorted(analysis['mines'])}")
+    print(f"[AI] Best move: {analysis['best_move']}")
+
+
+def run_online():
+    scraper = None
     try:
-        driver.get(url)
-        while True:
-            board = scraper.read_board()
-            safe, mines = find_moves(board)
-            for cell in mines:
-                scraper.flag(cell)
-            if safe:
-                for cell in safe:
-                    scraper.click(cell)
-                time.sleep(delay)
-                continue
-            if mines:
-                time.sleep(delay)
-                continue
-            raise RuntimeError(
-                "No provably safe move exists. Increase solver coverage or choose manually."
+        scraper = MinesweeperScraper("https://minesweeperonline.com/")
+        agent = MinesweeperAgent()
+
+        print("[+] Browser opened successfully.")
+        print("[*] Make moves manually in the browser; the AI only displays guidance.")
+
+        def read_and_show():
+            board = scraper.get_board_matrix()
+            if board is None:
+                return None
+            analysis = agent.update(board)
+            safe_moves = set(analysis["safe_moves"])
+            mines = set(analysis["mines_to_flag"])
+            best_move = analysis["best_move"]
+            scraper.highlight_cells(safe_moves, mines, best_move)
+            print(
+                f"[AI] Ready: red={len(mines)} mine(s), green={len(safe_moves)} safe move(s), "
+                f"yellow={'safe' if analysis['best_move_safe'] else 'risk/none'}"
             )
+            print(
+                f"[AI] Board {len(board)}x{len(board[0])}: "
+                f"flags={len(analysis['flags'])}, hidden={sum(value == -1 for row in board for value in row)}"
+            )
+            return analysis
+
+        analysis = read_and_show()
+        if analysis is None:
+            print("[-] The board could not be read. Refresh the game and restart the program.")
+            return
+
+        last_signature = scraper.get_board_signature()
+        while True:
+            current_signature = scraper.get_board_signature()
+            if current_signature != last_signature:
+                analysis = read_and_show()
+                last_signature = current_signature
+                if analysis is None:
+                    print("[-] The board is no longer available. Restart after refreshing the game.")
+                    return
+            time.sleep(0.15)
+            
+    except SiteBlockedError as error:
+        print(f"[-] {error}")
+        print("[-] Automation stopped. Resolve the restriction through the website's official support process.")
+    except KeyboardInterrupt:
+        print("\n[*] Shutting down scraper...")
     finally:
-        driver.quit()
+        if scraper is not None:
+            scraper.close()
 
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("url", nargs="?", default=os.getenv("MINESWEEPER_URL"))
-    parser.add_argument("--delay", type=float, default=0.15)
-    parser.add_argument("--headless", action="store_true")
+def main():
+    parser = argparse.ArgumentParser(description="Run the Minesweeper AI assistant.")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--online", action="store_true", help="Use the browser scraper.")
+    mode_group.add_argument("--offline", action="store_true", help="Run the solver on the built-in test board.")
     args = parser.parse_args()
-    if not args.url:
-        parser.error("provide a URL or set MINESWEEPER_URL")
-    play(args.url, args.delay, args.headless)
+    mode = "offline" if args.offline else "online"
+
+    if mode == "offline":
+        run_offline()
+    elif mode == "online":
+        run_online()
+    else:
+        raise ValueError("RUN_MODE must be 'offline' or 'online'")
 
 
 if __name__ == "__main__":
