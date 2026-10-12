@@ -161,7 +161,14 @@ class MinesweeperScraper:
             print(f"[-] Could not read board status: {e}")
             return None
 
-    def highlight_cells(self, safe_cells=(), mine_cells=(), recommended=None):
+    def highlight_cells(
+        self,
+        safe_cells=(),
+        mine_cells=(),
+        recommended=None,
+        recommended_safe=False,
+        recommended_risk=None,
+    ):
         try:
             cells = self._get_cell_elements()
             if not cells:
@@ -193,10 +200,18 @@ class MinesweeperScraper:
                         "arguments[0].style.boxShadow='0 0 8px ' + arguments[2];",
                         element, label, color,
                     )
+            if recommended is None:
+                yellow_summary = "none"
+            elif recommended_safe:
+                yellow_summary = "PROVABLE SAFE"
+            elif recommended_risk is None:
+                yellow_summary = "UNCERTAIN"
+            else:
+                yellow_summary = f"UNCERTAIN | MINE RISK: {recommended_risk:.0%}"
             summary = (
                 f"RED: {len(mine_cells)} mine(s) | "
                 f"GREEN: {len(safe_cells)} safe | "
-                f"YELLOW: {'ready' if recommended is not None else 'none'}"
+                f"YELLOW: {yellow_summary}"
             )
             self.driver.execute_script(
                 "let panel = document.getElementById('minesweeper-ai-panel');"

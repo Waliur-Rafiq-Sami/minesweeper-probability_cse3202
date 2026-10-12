@@ -142,6 +142,13 @@ The yellow cell is the solver's best current recommendation.
 
 Yellow can represent a guaranteed-safe recommendation when one exists. If no guaranteed-safe move exists, it can represent the lowest-risk candidate available from the local clue information. The user decides whether to play it.
 
+The monitor and terminal make this distinction explicit:
+
+- `PROVABLE SAFE`: the constraint solver proved that the yellow cell cannot be a mine from the current board information.
+- `UNCERTAIN | MINE RISK: N%`: the solver could not prove safety and is showing its local estimated probability that the cell is a mine.
+
+The risk percentage is an estimate from the visible clue constraints, not a guarantee and not a global probability calculation.
+
 ## Browser Monitor
 
 The monitor is injected into the game page and fixed to the bottom of the browser window.
@@ -151,7 +158,8 @@ It displays:
 - `MINESWEEPER AI`
 - Number of red mine candidates.
 - Number of green safe candidates.
-- Whether a yellow recommendation exists.
+- Yellow proof status: `PROVABLE SAFE` or `UNCERTAIN`.
+- Estimated yellow mine risk when the recommendation is uncertain.
 - A short instruction that the user makes moves manually.
 - A color legend.
 
