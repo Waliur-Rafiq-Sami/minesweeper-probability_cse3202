@@ -74,6 +74,7 @@ Responsibilities:
 - Detects access-block pages.
 - Finds visible board cells.
 - Converts DOM classes into a board matrix.
+- Reads board state and updates all cell highlights in batched browser operations to reduce Selenium round trips.
 - Calculates board dimensions from cell IDs when available.
 - Creates the bottom browser monitor.
 - Draws and clears red, green, and yellow outlines.

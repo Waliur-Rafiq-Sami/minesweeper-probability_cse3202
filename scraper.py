@@ -12,6 +12,11 @@ class SiteBlockedError(RuntimeError):
 
 class MinesweeperScraper:
     _CELL_SELECTORS = ("#game .square", "#game .cell", ".cell")
+    _BLOCKED_MARKERS = (
+        "your ip address has been blocked",
+        "account blocked",
+        "access denied",
+    )
 
     def __init__(self, difficulty_url="https://minesweeperonline.com/"):
         print("[*] Initializing Chrome WebDriver...")
@@ -23,40 +28,59 @@ class MinesweeperScraper:
         self._raise_if_blocked()
 
     def _raise_if_blocked(self):
-        page_text = f"{self.driver.title}\n{self.driver.page_source}".lower()
-        blocked_markers = (
-            "your ip address has been blocked",
-            "account blocked",
-            "access denied",
+        is_blocked = self.driver.execute_script(
+            "const text = (document.title + '\\n' + "
+            "(document.documentElement ? document.documentElement.outerHTML : '')).toLowerCase();"
+            "return arguments[0].some(marker => text.includes(marker));",
+            self._BLOCKED_MARKERS,
         )
-        if any(marker in page_text for marker in blocked_markers):
+        if is_blocked:
             raise SiteBlockedError(
                 "Minesweeper Online has blocked this IP or account. "
                 "Stop automation and contact the site's official support team."
             )
 
     def get_board_matrix(self):
-        self._raise_if_blocked()
         try:
-            cell_elements = self._get_cell_elements()
-            
-            if not cell_elements:
+            result = self.driver.execute_script(
+                "const text = (document.title + '\\n' + "
+                "(document.documentElement ? document.documentElement.outerHTML : '')).toLowerCase();"
+                "if (arguments[1].some(marker => text.includes(marker))) "
+                "return {blocked:true, cells:[]};"
+                "for (const selector of arguments[0]) {"
+                "const cells = Array.from(document.querySelectorAll(selector))"
+                ".filter(cell => cell.getClientRects().length && "
+                "getComputedStyle(cell).visibility !== 'hidden');"
+                "if (cells.length) return {blocked:false, cells:cells.map(cell => [cell.id, cell.className])};"
+                "} return {blocked:false, cells:[]};",
+                self._CELL_SELECTORS,
+                self._BLOCKED_MARKERS,
+            )
+            if result["blocked"]:
+                raise SiteBlockedError(
+                    "Minesweeper Online has blocked this IP or account. "
+                    "Stop automation and contact the site's official support team."
+                )
+            cell_data = result["cells"]
+
+            if not cell_data:
                 print("[-] Error: Could not find cells on the page.")
                 return None
 
-            rows, cols = self._get_dimensions(cell_elements)
-            if len(cell_elements) != rows * cols:
-                print(f"[-] Error: Incomplete board ({len(cell_elements)} cells for {rows}x{cols}).")
+            cell_data.sort(key=lambda cell: self._cell_id_sort_key(cell[0]))
+            rows, cols = self._get_dimensions_from_ids(
+                [cell_id for cell_id, _ in cell_data]
+            )
+            if len(cell_data) != rows * cols:
+                print(f"[-] Error: Incomplete board ({len(cell_data)} cells for {rows}x{cols}).")
                 return None
 
             board_matrix = []
-            cell_idx = 0
 
             for r in range(rows):
                 row_data = []
                 for c in range(cols):
-                    element = cell_elements[cell_idx]
-                    class_tokens = set((element.get_attribute("class") or "").split())
+                    class_tokens = set((cell_data[r * cols + c][1] or "").split())
 
                     if {"bombflagged", "hdd_flag"} & class_tokens or "flag" in class_tokens:
                         row_data.append("F")
@@ -74,8 +98,6 @@ class MinesweeperScraper:
                             row_data.append(int(match.group(1)))
                         else:
                             row_data.append(-1)
-                    
-                    cell_idx += 1
                 board_matrix.append(row_data)
 
             return board_matrix
@@ -89,6 +111,8 @@ class MinesweeperScraper:
                 return self.get_board_matrix()
             finally:
                 self._retrying_board = False
+        except SiteBlockedError:
+            raise
         except Exception as e:
             print(f"[-] Error while parsing board DOM: {e}")
             return None
@@ -106,13 +130,23 @@ class MinesweeperScraper:
 
     @staticmethod
     def _cell_sort_key(element):
-        match = re.fullmatch(r"(\d+)_(\d+)", element.get_attribute("id") or "")
+        return MinesweeperScraper._cell_id_sort_key(element.get_attribute("id") or "")
+
+    @staticmethod
+    def _cell_id_sort_key(cell_id):
+        match = re.fullmatch(r"(\d+)_(\d+)", cell_id or "")
         return tuple(int(value) for value in match.groups()) if match else (0, 0)
 
     def _get_dimensions(self, cells):
+        return self._get_dimensions_from_ids(
+            [cell.get_attribute("id") or "" for cell in cells]
+        )
+
+    @staticmethod
+    def _get_dimensions_from_ids(cell_ids):
         coordinates = []
-        for cell in cells:
-            match = re.fullmatch(r"(\d+)_(\d+)", cell.get_attribute("id") or "")
+        for cell_id in cell_ids:
+            match = re.fullmatch(r"(\d+)_(\d+)", cell_id)
             if match:
                 coordinates.append(tuple(int(value) for value in match.groups()))
 
@@ -170,36 +204,8 @@ class MinesweeperScraper:
         recommended_risk=None,
     ):
         try:
-            cells = self._get_cell_elements()
-            if not cells:
-                print("[-] Could not highlight cells: board is not available.")
-                return
-            rows, cols = self._get_dimensions(cells)
             safe_cells = set(safe_cells)
             mine_cells = set(mine_cells)
-            for row in range(rows):
-                for col in range(cols):
-                    element = cells[row * cols + col]
-                    self.driver.execute_script(
-                        "arguments[0].removeAttribute('data-minesweeper-ai-highlight');"
-                        "arguments[0].style.outline='';arguments[0].style.boxShadow='';",
-                        element,
-                    )
-                    cell = (row, col)
-                    if cell == recommended:
-                        color, label = "#fdd835", "recommended"
-                    elif cell in mine_cells:
-                        color, label = "#e53935", "mine"
-                    elif cell in safe_cells:
-                        color, label = "#43a047", "safe"
-                    else:
-                        continue
-                    self.driver.execute_script(
-                        "arguments[0].setAttribute('data-minesweeper-ai-highlight', arguments[1]);"
-                        "arguments[0].style.outline='3px solid ' + arguments[2];"
-                        "arguments[0].style.boxShadow='0 0 8px ' + arguments[2];",
-                        element, label, color,
-                    )
             if recommended is None:
                 yellow_summary = "none"
             elif recommended_safe:
@@ -213,7 +219,54 @@ class MinesweeperScraper:
                 f"GREEN: {len(safe_cells)} safe | "
                 f"YELLOW: {yellow_summary}"
             )
-            self.driver.execute_script(
+            recommended_element = self.driver.execute_script(
+                "let cells = []; for (const selector of arguments[0]) {"
+                "cells = Array.from(document.querySelectorAll(selector))"
+                ".filter(cell => cell.getClientRects().length && "
+                "getComputedStyle(cell).visibility !== 'hidden');"
+                "if (cells.length) break;"
+                "}"
+                "if (!cells.length) return {available:false, element:null};"
+                "const coordinates = cells.map(cell => {"
+                "const match = /^(\\d+)_(\\d+)$/.exec(cell.id);"
+                "return match ? [Number(match[1]), Number(match[2])] : [0, 0];"
+                "});"
+                "cells.sort((left, right) => {"
+                "const a = /^(\\d+)_(\\d+)$/.exec(left.id);"
+                "const b = /^(\\d+)_(\\d+)$/.exec(right.id);"
+                "const ar = a ? Number(a[1]) : 0, ac = a ? Number(a[2]) : 0;"
+                "const br = b ? Number(b[1]) : 0, bc = b ? Number(b[2]) : 0;"
+                "return ar - br || ac - bc;"
+                "});"
+                "const valid = coordinates.filter(([row, col]) => row && col);"
+                "let rows, cols;"
+                "if (valid.length) {"
+                "rows = new Set(valid.map(([row]) => row)).size;"
+                "cols = new Set(valid.map(([, col]) => col)).size;"
+                "} else {"
+                "const dimensions = {81:[9,9], 256:[16,16], 480:[16,30], 576:[16,36]};"
+                "if (!dimensions[cells.length]) throw new Error('Unsupported board size (' + cells.length + ' cells)');"
+                "[rows, cols] = dimensions[cells.length];"
+                "}"
+                "if (cells.length !== rows * cols) throw new Error('Incomplete board (' + cells.length + ' cells for ' + rows + 'x' + cols + ')');"
+                "const safe = new Set(arguments[1].map(([row, col]) => row + ',' + col));"
+                "const mines = new Set(arguments[2].map(([row, col]) => row + ',' + col));"
+                "const best = arguments[3]; let recommendedElement = null;"
+                "cells.forEach((cell, index) => {"
+                "cell.removeAttribute('data-minesweeper-ai-highlight');"
+                "cell.style.outline = ''; cell.style.boxShadow = '';"
+                "const key = Math.floor(index / cols) + ',' + (index % cols);"
+                "let color, label;"
+                "if (best && key === best[0] + ',' + best[1]) {"
+                "color = '#fdd835'; label = 'recommended'; recommendedElement = cell;"
+                "} else if (mines.has(key)) { color = '#e53935'; label = 'mine';"
+                "} else if (safe.has(key)) { color = '#43a047'; label = 'safe'; }"
+                "if (color) {"
+                "cell.setAttribute('data-minesweeper-ai-highlight', label);"
+                "cell.style.outline = '3px solid ' + color;"
+                "cell.style.boxShadow = '0 0 8px ' + color;"
+                "}"
+                "});"
                 "let panel = document.getElementById('minesweeper-ai-panel');"
                 "if (!panel) {"
                 "panel = document.createElement('div'); panel.id = 'minesweeper-ai-panel';"
@@ -222,7 +275,7 @@ class MinesweeperScraper:
                 "+ '<span data-role=hint>Make your move manually. AI guidance only.</span>'"
                 "+ '<span data-role=legend>RED = mine | GREEN = safe | YELLOW = best</span>';"
                 "document.body.appendChild(panel); }"
-                "panel.querySelector('[data-role=summary]').textContent = arguments[0];"
+                "panel.querySelector('[data-role=summary]').textContent = arguments[4];"
                 "panel.style.cssText = 'position:fixed;z-index:2147483647;left:0;right:0;bottom:0;"
                 "background:#111;color:#fff;padding:10px 14px;font:14px monospace;"
                 "border-top:3px solid #777;box-sizing:border-box;display:flex;gap:18px;"
@@ -230,11 +283,20 @@ class MinesweeperScraper:
                 "panel.querySelector('[data-role=title]').style.cssText = 'font-weight:bold;';"
                 "panel.querySelector('[data-role=summary]').style.cssText = 'flex:1;';"
                 "panel.querySelector('[data-role=hint]').style.cssText = 'color:#bbb;';"
-                "panel.querySelector('[data-role=legend]').style.cssText = 'color:#ddd;';",
+                "panel.querySelector('[data-role=legend]').style.cssText = 'color:#ddd;';"
+                "return {available:true, element:recommendedElement};",
+                self._CELL_SELECTORS,
+                [list(cell) for cell in safe_cells],
+                [list(cell) for cell in mine_cells],
+                list(recommended) if recommended is not None else None,
                 summary,
             )
-            if recommended is not None:
-                ActionChains(self.driver).move_to_element(self._get_cell(*recommended)).perform()
+            if not recommended_element["available"]:
+                print("[-] Could not highlight cells: board is not available.")
+                return
+            recommended_element = recommended_element["element"]
+            if recommended_element is not None:
+                ActionChains(self.driver).move_to_element(recommended_element).perform()
         except Exception as e:
             print(f"[-] Could not highlight cells: {e}")
 
