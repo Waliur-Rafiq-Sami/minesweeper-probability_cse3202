@@ -5,6 +5,10 @@ Board = list[list[int | str]]
 
 
 def _neighbors(row: int, col: int, rows: int, cols: int) -> Iterable[Cell]:
+
+    # Yield the valid cells around a position, including diagonals.
+    # The current position itself is excluded because both clue counts and
+    # Minesweeper adjacency rules apply only to surrounding cells.
     for row_delta in (-1, 0, 1):
         for col_delta in (-1, 0, 1):
             if not row_delta and not col_delta:
@@ -21,6 +25,8 @@ def analyze_board(
     known_safe: Iterable[Cell] = (),
 ) -> dict[str, object]:
     """Find provably safe cells and mines from the currently visible board."""
+    
+    # Reject malformed boards before using coordinates throughout the solver.
     if not board or not board[0]:
         raise ValueError("Board must not be empty")
 
@@ -29,6 +35,8 @@ def analyze_board(
     if any(len(row) != cols for row in board):
         raise ValueError("Board rows must have the same length")
 
+    # Treat visible flags and caller-supplied mine deductions as known mines.
+    # A cell cannot be both known safe and known mined.
     flagged = {
         (row, col)
         for row in range(rows)
@@ -38,6 +46,10 @@ def analyze_board(
     known_mine_cells = set(flagged) | set(known_mines)
     known_safe_cells = set(known_safe) - known_mine_cells
 
+    # Revisit every clue until a full pass produces no new deductions.
+    # Each clue reduces its mine count by already-known adjacent mines; if
+    # none remain, its unknown neighbors are safe, and if all remain, they
+    # must all be mines. Updates are visible to later clues in the same pass.
     while True:
         changed = False
         for row in range(rows):
@@ -70,6 +82,8 @@ def analyze_board(
         if not changed:
             break
 
+    # Exclude flags from the user-facing deduction sets. Hidden candidates
+    # are the remaining unopened cells that have not been proven to be mines.
     safe_moves = known_safe_cells - flagged
     deduced_mines = known_mine_cells - flagged
     hidden_cells = {
@@ -80,6 +94,10 @@ def analyze_board(
     }
     candidates = hidden_cells - known_mine_cells
     risk_by_cell: dict[Cell, float] = {}
+
+    # For cells not proven safe, estimate risk from each adjacent clue.
+    # This is a ranking heuristic, not a proof: use the most cautious local
+    # estimate when a candidate borders multiple numbered cells.
     for row, col in candidates:
         risks = []
         for clue_row, clue_col in _neighbors(row, col, rows, cols):
@@ -98,6 +116,8 @@ def analyze_board(
                     risks.append(max(0.0, min(1.0, remaining / len(unknown))))
         risk_by_cell[(row, col)] = max(risks) if risks else 1.0
 
+    # Prefer a proven-safe move whenever one exists; otherwise choose the
+    # lowest estimated risk, using coordinates to make ties deterministic.
     best_move = min(
         safe_moves or candidates,
         key=lambda cell: (0 if cell in safe_moves else 1, risk_by_cell.get(cell, 1.0), cell),
@@ -116,6 +136,8 @@ class MinesweeperAgent:
     """Stateful wrapper that avoids re-solving unchanged board states."""
 
     def __init__(self):
+        # Keep deductions across board updates and cache the last analysis.
+        # AI-owned flags are tracked separately from flags placed by the user.
         self.previous_board: tuple[tuple[int | str, ...], ...] | None = None
         self.confirmed_mines: set[Cell] = set()
         self.confirmed_safe: set[Cell] = set()
@@ -147,6 +169,9 @@ class MinesweeperAgent:
         self.confirmed_mines = (self.confirmed_mines & hidden_cells) | current_flags
         self.confirmed_safe &= hidden_cells
 
+        # An unchanged board has the same analysis, so return the cached
+        # result. Otherwise, seed the solver with deductions retained from
+        # earlier updates, then merge its newly proven cells into that state.
         if board_snapshot == self.previous_board and self._cached_analysis is not None:
             return self._cached_analysis
 
@@ -170,6 +195,8 @@ class MinesweeperAgent:
         self.ai_flags.update(cells)
     
     def _is_new_game(self, board_snapshot):
+        # A reset is detected when the number of opened, non-flagged cells
+        # decreases; this prevents deductions from leaking into a new board.
         if self.previous_board is None:
             return True
         previous_open = sum(
