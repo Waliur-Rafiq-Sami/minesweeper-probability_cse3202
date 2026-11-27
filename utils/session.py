@@ -1,3 +1,5 @@
+# Session utility module
+
 DEFAULT_TIMEOUT = 20
 
 try:

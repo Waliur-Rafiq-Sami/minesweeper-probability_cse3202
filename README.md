@@ -2,7 +2,7 @@
 
 A browser-connected Minesweeper analysis assistant. The project reads the visible board from Chrome, applies deterministic Minesweeper constraint reasoning, and displays guidance directly on the board.
 
-The assistant is intentionally **passive**: it does not click cells, place flags, enter values, or control the game. The user makes every move manually. The AI only reads the current board, calculates guidance, and draws red, green, and yellow outlines.
+The assistant is intentionally **passive**: it does not click cells, place flags, enter values, or control the game. The user makes every move manually. The AI only reads the current board, calculates guidance, and draws red, green, and yellow top-left corner markers on frontier cells.
 
 ## What AI Is Used?
 
@@ -18,11 +18,11 @@ The agent:
 - Examines the eight neighboring cells around every clue.
 - Deduces guaranteed mines.
 - Deduces guaranteed-safe cells.
-- Tracks confirmed mines and safe cells between board updates.
 - Reuses cached analysis when the board has not changed.
 - Selects a best candidate when no guaranteed-safe move exists.
-- Estimates a local risk for uncertain candidates.
-- Resets its internal game knowledge when it detects a new or restarted board.
+- Calculates cell risks from clue-consistent assignments.
+- Uses the game's remaining-mine counter to constrain unresolved frontier cells.
+- Recomputes deductions from the current board after every change.
 
 ### Why an LLM is not used
 
@@ -74,10 +74,13 @@ Responsibilities:
 - Detects access-block pages.
 - Finds visible board cells.
 - Converts DOM classes into a board matrix.
+- Reads the visible remaining-mine counter.
 - Reads board state and updates all cell highlights in batched browser operations to reduce Selenium round trips.
+- Waits for the board and mine counter to stabilize before analyzing changes.
+- Clears markers on opened, flagged, or game-over cells.
 - Calculates board dimensions from cell IDs when available.
 - Creates the bottom browser monitor.
-- Draws and clears red, green, and yellow outlines.
+- Draws and clears red, green, and yellow top-left L-bracket markers.
 - Computes a lightweight board signature for change detection.
 - Retries once when Selenium reports a stale element during a board redraw.
 - Closes the browser safely.
@@ -119,11 +122,11 @@ The scraper converts the web page into a two-dimensional matrix.
 
 The solver uses row and column coordinates in zero-based form. For example, `(2, 5)` means row 2 and column 5.
 
-The matrix is used internally by the solver. The browser monitor does not display these values or coordinates to the user.
+The matrix values are used internally by the solver. The risk panel displays hidden cell coordinates in zero-based row, column order.
 
 ## Color Meaning
 
-The browser draws outlines around cells after every meaningful board update.
+The browser draws top-left L-bracket markers on frontier cells after every stable board update.
 
 ### Red
 
@@ -133,22 +136,21 @@ The AI does not place the flag. The user must right-click or flag it manually in
 
 ### Green
 
-A green cell is a cell the solver has deduced to be safe based on the visible clues.
+A green cell has exactly 0% mine risk according to the current clue constraints.
 
 The AI does not open the cell. The user must click it manually.
 
 ### Yellow
 
-The yellow cell is the solver's best current recommendation.
-
-Yellow can represent a guaranteed-safe recommendation when one exists. If no guaranteed-safe move exists, it can represent the lowest-risk candidate available from the local clue information. The user decides whether to play it.
+Only hidden cells adjacent to an opened clue are highlighted. Yellow cells in that group have a mine risk greater than 0% and less than 100%; the panel lists those cells' row, column, and risk percentage. Unopened cells elsewhere on the board are left uncolored.
 
 The monitor and terminal make this distinction explicit:
 
-- `PROVABLE SAFE`: the constraint solver proved that the yellow cell cannot be a mine from the current board information.
-- `UNCERTAIN | MINE RISK: N%`: the solver could not prove safety and is showing its local estimated probability that the cell is a mine.
+- `GREEN`: 0% mine risk.
+- `RED`: 100% mine risk.
+- `YELLOW`: uncertain risk, with the percentage shown beside the cell coordinate.
 
-The risk percentage is an estimate from the visible clue constraints, not a guarantee and not a global probability calculation.
+Exact risks are calculated by enumerating clue-consistent assignments within each connected group of hidden cells. Only hidden cells adjacent to opened clues are reported; deep interior cells are left uncolored. The remaining-mine counter can prove unresolved frontier cells safe or mined. If a group's search exceeds the safety limit or its clues are inconsistent, unresolved values are estimates and are deliberately kept between 1% and 99%; direct clue deductions are retained unless direct clues conflict.
 
 ## Browser Monitor
 
@@ -159,8 +161,7 @@ It displays:
 - `MINESWEEPER AI`
 - Number of red mine candidates.
 - Number of green safe candidates.
-- Yellow proof status: `PROVABLE SAFE` or `UNCERTAIN`.
-- Estimated yellow mine risk when the recommendation is uncertain.
+- Risk percentages for hidden cells adjacent to open clues, formatted as `cell [row,col] risk = N%`.
 - A short instruction that the user makes moves manually.
 - A color legend.
 
@@ -168,7 +169,6 @@ It does not contain:
 
 - Red, green, yellow, clear, or quit buttons.
 - Cell values.
-- Cell coordinates.
 - Automatic-action controls.
 - Terminal-command controls.
 
@@ -220,7 +220,7 @@ The program will:
 6. Wait for the user to play manually in Chrome.
 7. Detect the changed board.
 8. Recalculate the AI guidance.
-9. Refresh the red, green, and yellow outlines.
+9. Refresh the red, green, and yellow markers.
 10. Print the new progress information in the terminal.
 
 No Enter key or command input is required after startup.
@@ -246,7 +246,7 @@ The terminal reports meaningful state changes, including:
 - Number of hidden cells.
 - Number of red mine candidates.
 - Number of green safe candidates.
-- Whether the yellow recommendation is guaranteed safe or uncertain.
+- Number of uncertain yellow cells and the best move's status.
 - Board parsing failures.
 - Selenium stale-element retries.
 - Shutdown messages.
@@ -255,39 +255,21 @@ The terminal is for monitoring. It is not used to submit moves or enter cell val
 
 ## Solver Method
 
-For each open clue, the agent calculates:
-
-1. All neighboring coordinates.
-2. Which neighbors are hidden.
-3. Which neighbors are already known mines.
-4. The remaining mine count.
-5. Whether the remaining count proves all hidden neighbors safe.
-6. Whether the remaining count proves all hidden neighbors mines.
-
-The deduction rules are:
-
-- Remaining mines equal `0`: all remaining hidden neighbors are safe.
-- Remaining mines equal the number of hidden neighbors: all hidden neighbors are mines.
-
-The agent repeats these deductions until no new facts can be found.
-
-If no guaranteed-safe move is available, the agent calculates a local risk estimate for candidate hidden cells. It then selects the lowest-risk candidate using deterministic ordering.
+The solver first propagates direct clue and subset deductions, then enumerates assignments that satisfy each connected group of hidden cells. This preserves certain mines and safe cells even when a large group reaches the search limit. A cell is green only when every valid assignment makes it safe, and red only when every valid assignment makes it a mine. Other adjacent hidden cells are yellow, with their mine risk shown in the panel. Cells not adjacent to open clues stay uncolored.
 
 ## Memory and Caching
 
 The project uses in-process agent memory through `MinesweeperAgent`.
 
-It remembers:
+It caches:
 
 - The previous board snapshot.
-- Confirmed mine coordinates.
-- Confirmed safe coordinates.
 - AI flag tracking state for compatibility.
 - The last analysis result.
 
 When the board matrix is unchanged, the cached analysis is returned instead of running the solver again. This reduces unnecessary work while the user is thinking.
 
-When the board changes, the agent updates its state. If the number of open cells decreases, it treats the situation as a new or restarted game and clears stale deductions.
+When the board changes, the agent recomputes deductions from the current clues instead of carrying safe or mine claims across board states. This avoids stale deductions surviving a restart where the number of open cells stays the same.
 
 ## Safety Model
 
@@ -308,10 +290,10 @@ The user remains responsible for every move. Red, green, and yellow are recommen
 
 - The solver can only reason from visible clues and detected flags.
 - Some boards do not contain a mathematically guaranteed safe move.
-- Risk estimates are local and are not a complete global probability model.
-- A yellow recommendation may be uncertain when no safe move can be proven.
+- The remaining-mine counter constrains global certainty, but probabilities across multiple frontier components are not jointly enumerated.
+- Interior cells that do not touch an opened clue are not scored or highlighted.
+- Very large or inconsistent connected clue groups can exceed exact analysis; unresolved cells are shown with estimated risk and remain yellow, while unconflicted direct clue proofs are retained.
 - A user flag is trusted as a mine input.
-- Changing or restarting the board can invalidate earlier deductions; the agent attempts to detect this and reset.
 - Website DOM changes may require selector updates in `scraper.py`.
 - Website access restrictions cannot be bypassed by this project.
 - The project depends on Selenium and a compatible Chrome environment.

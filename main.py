@@ -43,9 +43,14 @@ def run_online():
             board = scraper.get_board_matrix()
             if board is None:
                 return None
-            analysis = agent.update(board)
+            remaining_mines = scraper.get_remaining_mines()
+            flags = sum(value == "F" for row in board for value in row)
+            total_mines = (
+                None if remaining_mines is None else remaining_mines + flags
+            )
+            analysis = agent.update(board, total_mines=total_mines)
             safe_moves = set(analysis["safe_moves"])
-            mines = set(analysis["mines_to_flag"])
+            mines = set(analysis["mines"])
             best_move = analysis["best_move"]
             scraper.highlight_cells(
                 safe_moves,
@@ -53,16 +58,22 @@ def run_online():
                 best_move,
                 recommended_safe=analysis["best_move_safe"],
                 recommended_risk=analysis["best_move_risk"],
+                risk_by_cell=analysis["risk_by_cell"],
             )
+            uncertain_cells = {
+                cell
+                for cell, risk in analysis["risk_by_cell"].items()
+                if 0.001 < risk < 0.999
+            }
             if best_move is None:
-                yellow_status = "none"
+                best_status = "none"
             elif analysis["best_move_safe"]:
-                yellow_status = "PROVABLE SAFE"
+                best_status = "PROVABLE SAFE"
             else:
-                yellow_status = f"UNCERTAIN, mine risk={analysis['best_move_risk']:.0%}"
+                best_status = "UNCERTAIN"
             print(
                 f"[AI] Ready: red={len(mines)} mine(s), green={len(safe_moves)} safe move(s), "
-                f"yellow={yellow_status}"
+                f"yellow={len(uncertain_cells)} uncertain cell(s), best={best_status}"
             )
             print(
                 f"[AI] Board {len(board)}x{len(board[0])}: "
@@ -70,20 +81,26 @@ def run_online():
             )
             return analysis
 
+        last_signature = scraper.get_stable_board_signature()
+        if last_signature is None:
+            print("[-] The board did not stabilize. Refresh the game and restart the program.")
+            return
+
         analysis = read_and_show()
         if analysis is None:
             print("[-] The board could not be read. Refresh the game and restart the program.")
             return
 
-        last_signature = scraper.get_board_signature()
         while True:
             current_signature = scraper.get_board_signature()
-            if current_signature != last_signature:
-                analysis = read_and_show()
-                last_signature = current_signature
-                if analysis is None:
-                    print("[-] The board is no longer available. Restart after refreshing the game.")
-                    return
+            if current_signature is not None and current_signature != last_signature:
+                stable_signature = scraper.get_stable_board_signature()
+                if stable_signature is not None and stable_signature != last_signature:
+                    analysis = read_and_show()
+                    if analysis is None:
+                        print("[-] The board is no longer available. Restart after refreshing the game.")
+                        return
+                    last_signature = stable_signature
             time.sleep(0.15)
             
     except SiteBlockedError as error:
